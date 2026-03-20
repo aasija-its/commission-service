@@ -82,19 +82,13 @@ jobs:
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --template-file infra/main.bicep \
             --parameters imageTag="${{ needs.build.outputs.image_tag }}" \
+                       acrPassword="${{ secrets.ACR_PASSWORD }}" \
             --query "properties.outputs" \
             --output json)
 
           FQDN=$(echo "$OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['fqdn']['value'])")
           echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
           echo "Deployed to: https://$FQDN"
-
-      - name: Patch ACR secret on Container App
-        run: |
-          az containerapp secret set \
-            --name ${{ env.CONTAINER_APP }} \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --secrets "acr-password=${{ secrets.ACR_PASSWORD }}"
 
       - name: Health check
         run: |

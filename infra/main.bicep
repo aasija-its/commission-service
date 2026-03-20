@@ -13,6 +13,10 @@ param sqlDatabase string = 'sdb-inc-tms-web-uat-wus2'
 @description('Application Insights connection string')
 param appInsightsConnectionString string = ''
 
+@description('ACR admin password (injected by pipeline)')
+@secure()
+param acrPassword string = ''
+
 // ─── References to existing shared resources ──────────────────────────────────
 var acrServer  = 'trailermaintenanceacr.azurecr.io'
 var envId      = resourceId('Microsoft.App/managedEnvironments', 'trailer-maintenance-env')
@@ -36,10 +40,9 @@ resource commissionApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       secrets: [
-        { name: 'acr-password',         value: '' }   // patched by pipeline
-        { name: 'sql-server',           value: sqlServer }
-        { name: 'sql-database',         value: sqlDatabase }
-        { name: 'appinsights-connstr',  value: appInsightsConnectionString }
+        { name: 'acr-password',   value: acrPassword }
+        { name: 'sql-server',     value: sqlServer }
+        { name: 'sql-database',   value: sqlDatabase }
       ]
       ingress: {
         external:   true
@@ -58,14 +61,13 @@ resource commissionApp 'Microsoft.App/containerApps@2023-05-01' = {
           name:  'commission-service'
           image: '${acrServer}/commission-service:${imageTag}'
           env: [
-            { name: 'SQL_SERVER',                        secretRef: 'sql-server' }
-            { name: 'SQL_DATABASE',                      secretRef: 'sql-database' }
-            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connstr' }
-            { name: 'DEFAULT_TRANSPORT_RATE',            value: '0.02' }
-            { name: 'DEFAULT_PROCUREMENT_RATE',          value: '0.05' }
+            { name: 'SQL_SERVER',             secretRef: 'sql-server' }
+            { name: 'SQL_DATABASE',           secretRef: 'sql-database' }
+            { name: 'DEFAULT_TRANSPORT_RATE', value: '0.02' }
+            { name: 'DEFAULT_PROCUREMENT_RATE', value: '0.05' }
           ]
           resources: {
-            cpu:    '0.5'
+            cpu:    json('0.5')
             memory: '1Gi'
           }
           probes: [
