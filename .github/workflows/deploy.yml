@@ -1,0 +1,124 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ACR_REGISTRY:  trailermaintenanceacr.azurecr.io
+  IMAGE_NAME:    commission-service
+  RESOURCE_GROUP: trailer-maintenance-rg
+  CONTAINER_APP:  commission-service
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate image tag
+        id: meta
+        run: echo "tag=sha-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Azure Container Apps
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://${{ steps.deploy.outputs.fqdn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId":       "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret":   "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "tenantId":       "${{ secrets.AZURE_TENANT_ID }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+
+      - name: Provision Container App (Bicep)
+        id: deploy
+        run: |
+          OUTPUT=$(az deployment group create \
+            --name "commission-deploy-${{ github.run_number }}" \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file infra/main.bicep \
+            --parameters imageTag="${{ needs.build.outputs.image_tag }}" \
+            --query "properties.outputs" \
+            --output json)
+
+          FQDN=$(echo "$OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['fqdn']['value'])")
+          echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
+          echo "Deployed to: https://$FQDN"
+
+      - name: Patch ACR secret on Container App
+        run: |
+          az containerapp secret set \
+            --name ${{ env.CONTAINER_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --secrets "acr-password=${{ secrets.ACR_PASSWORD }}"
+
+      - name: Health check
+        run: |
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          echo "Waiting for app to be ready..."
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ Health check passed"
+              curl -s "https://$FQDN/health"
+              exit 0
+            fi
+            echo "Attempt $i/12 — status $STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "✗ Health check failed after 2 minutes"
+          exit 1
+
+      - name: Summary
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | https://${{ steps.deploy.outputs.fqdn }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Docs** | https://${{ steps.deploy.outputs.fqdn }}/docs |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Run** | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
